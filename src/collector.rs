@@ -1,18 +1,26 @@
 use crate::error::EngineError;
 use crate::transaction::Transaction;
-use anyhow::Result;
+use anyhow::{Error, Result};
 use csv::{Reader, ReaderBuilder, Trim};
+use futures::StreamExt;
 use std::{env, fs::File};
 use tokio::sync::mpsc::Sender;
 
 pub async fn start_processing_input_data(transaction_sink: Sender<Transaction>) -> Result<()> {
     let mut reader = initialize_reader()?;
 
-    let mut transaction_stream = reader.deserialize::<Transaction>();
-    for result in transaction_stream.by_ref() {
-        let transaction = result?;
-        transaction_sink.send(transaction).await?;
-    }
+    futures::stream::iter(reader.deserialize::<Transaction>().map(|result| async {
+        let transaction = result.map_err(Error::from)?;
+        transaction_sink
+            .send(transaction)
+            .await
+            .map_err(Error::from)
+    }))
+    .buffered(16)
+    .collect::<Vec<Result<()>>>()
+    .await
+    .into_iter()
+    .collect::<Result<_>>()?;
 
     Ok(())
 }
